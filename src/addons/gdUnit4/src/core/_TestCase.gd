@@ -13,7 +13,6 @@ var _iterations: int = 1
 var _current_iteration :int = -1
 var _seed: int
 var _fuzzers: Array[GdFunctionArgument] = []
-var _test_parameters := Array()
 var _test_param_index := -1
 var _line_number: int = -1
 var _script_path: String
@@ -24,15 +23,8 @@ var _timer : Timer
 var _interupted :bool = false
 var _failed := false
 var _report :GdUnitReport = null
-
-
-var monitor : GodotGdErrorMonitor = null:
-	set (value):
-		monitor = value
-	get:
-		if monitor == null:
-			monitor = GodotGdErrorMonitor.new()
-		return monitor
+var _fd :GdFunctionDescriptor
+var _test_case_names := PackedStringArray()
 
 
 var timeout : int = DEFAULT_TIMEOUT:
@@ -62,31 +54,19 @@ func execute(p_test_parameter := Array(), p_iteration := 0):
 	if _current_iteration == -1:
 		_set_failure_handler()
 		set_timeout()
-	monitor.start()
 	if not p_test_parameter.is_empty():
 		update_fuzzers(p_test_parameter, p_iteration)
 		_execute_test_case(name, p_test_parameter) 
 	else:
 		_execute_test_case(name, [])
 	await completed
-	monitor.stop()
-	for report_ in monitor.reports():
-		if report_.is_error():
-			_report = report_
-			_interupted = true
 
 
 func execute_paramaterized(p_test_parameter :Array):
 	_failure_received(false)
 	set_timeout()
-	monitor.start()
 	_execute_test_case(name, p_test_parameter)
 	await completed
-	monitor.stop()
-	for report_ in monitor.reports():
-		if report_.is_error():
-			_report = report_
-			_interupted = true
 
 
 var _is_disposed := false
@@ -176,7 +156,7 @@ func is_expect_interupted() -> bool:
 
 
 func is_parameterized() -> bool:
-	return _test_parameters.size() != 0
+	return _fd.is_parameterized()
 
 
 func is_skipped() -> bool:
@@ -229,16 +209,12 @@ func skip(skipped :bool, reason :String = "") -> void:
 	_skip_reason = reason
 
 
-func set_test_parameters(p_test_parameters :Array) -> void:
-	_test_parameters = p_test_parameters
+func set_function_descriptor(fd :GdFunctionDescriptor) -> void:
+	_fd = fd
 
 
 func set_test_parameter_index(index :int) -> void:
 	_test_param_index = index
-
-
-func test_parameters() -> Array:
-	return _test_parameters
 
 
 func test_parameter_index() -> int:
@@ -246,11 +222,47 @@ func test_parameter_index() -> int:
 
 
 func test_case_names() -> PackedStringArray:
-	var test_cases :=  PackedStringArray()
-	var test_name = get_name()
-	for index in _test_parameters.size():
-		test_cases.append("%s:%d %s" % [test_name, index, str(_test_parameters[index]).replace('"', "'").replace("&'", "'")])
-	return test_cases
+	if not is_parameterized():
+		return _test_case_names
+	# if test names already resolved?
+	if not _test_case_names.is_empty():
+		return _test_case_names
+	# Collect test case names by iterating over the test parameters
+	var parameters := GdFunctionArgument.get_parameter_set(_fd.args())
+	var test_parameter_expresion := parameters.value_as_string()
+	# test parameters are referenced externaly?
+	if not test_parameter_expresion.begins_with("["):
+		return _extract_test_names_from_expression()
+	# parse the parameters and build the test names
+	var regex := RegEx.new()
+	var s = "(?m)\\[(\\s*|((?:.|\n)*?)\\s*)\\]"
+	regex.compile(s)
+	# remove start of array before parsing
+	var matches = regex.search_all(test_parameter_expresion)
+	if matches.size() == 0:
+		push_error("Internal Error: Can't parse the parameterized test arguments!")
+	for index in matches.size():
+		var parameter = matches[index].get_string(0)
+		# cleanup parameter by remove newlines and tabs
+		parameter = parameter.replace("[\n", "").replace("\n", "").replace("\t", "")
+		_test_case_names.append(_build_test_case_name(parameter, index))
+	return _test_case_names
+
+
+func _extract_test_names_from_expression() -> PackedStringArray:
+	var parameters := GdTestParameterSet.extract_test_parameters(get_parent(), _fd)
+	for index in parameters.size():
+		_test_case_names.append(_build_test_case_name(str(parameters[index]), index))
+	return _test_case_names
+
+
+func _build_test_case_name(test_parameter :String, parameter_index :int) -> String:
+	if not test_parameter.begins_with("["):
+		test_parameter = "[" + test_parameter
+	var test_name = "%s:%d %s" % [get_name(), parameter_index, test_parameter.replace('"', "'").replace("&'", "'")]
+	if test_name.length() > 96:
+		return test_name.substr(0, 96) + " ..."
+	return test_name
 
 
 func _to_string():
